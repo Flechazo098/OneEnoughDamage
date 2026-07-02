@@ -9,17 +9,24 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
+import java.util.ArrayDeque;
 import java.util.ArrayList;
+import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Queue;
 import java.util.Set;
 import java.util.jar.JarEntry;
 import java.util.jar.JarFile;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 import java.util.stream.Stream;
 import org.objectweb.asm.ClassReader;
 import org.objectweb.asm.Opcodes;
+import org.objectweb.asm.signature.SignatureReader;
+import org.objectweb.asm.signature.SignatureVisitor;
 import org.objectweb.asm.tree.AbstractInsnNode;
 import org.objectweb.asm.tree.ClassNode;
 import org.objectweb.asm.tree.MethodNode;
@@ -42,14 +49,30 @@ public final class EntityCreatorAnalyzer {
     private static final String ENTITY_INTERNAL = "net/minecraft/world/entity/Entity";
     private static final String LIVING_ENTITY_INTERNAL = "net/minecraft/world/entity/LivingEntity";
     private static final String PROJECTILE_INTERNAL = "net/minecraft/world/entity/projectile/Projectile";
+    private static final String ENTITY_TYPE_INTERNAL = "net/minecraft/world/entity/EntityType";
+    private static final String BEHAVIOR_INTERNAL = "net/minecraft/world/entity/ai/behavior/Behavior";
+    private static final String ITEM_INTERNAL = "net/minecraft/world/item/Item";
+    private static final String BLOCK_INTERNAL = "net/minecraft/world/level/block/Block";
+    private static final String MOB_EFFECT_INTERNAL = "net/minecraft/world/effect/MobEffect";
+    private static final Pattern BEHAVIOR_TARGET_PATTERN = Pattern.compile(
+            "L" + Pattern.quote(BEHAVIOR_INTERNAL) + "<(?:L)?([^;>]+)"
+    );
+    private static final Pattern ENTITY_TYPE_PATTERN = Pattern.compile(
+            "L" + Pattern.quote(ENTITY_TYPE_INTERNAL) + "<(?:L)?([^;>]+)"
+    );
 
     private final Map<String, ClassInfo> hierarchy = new LinkedHashMap<>();
     private final List<Creation> creations = new ArrayList<>();
+    private final Map<String, String> behaviorTargets = new LinkedHashMap<>();
+    private Map<String, Set<String>> creatorIndex;
 
     /**
      * Runs the analysis over the current classpath.
      */
     public Map<String, Set<String>> analyze() {
+        if (creatorIndex != null) {
+            return creatorIndex;
+        }
         for (Path entry : classpathEntries()) {
             if (Files.isDirectory(entry)) {
                 scanDirectory(entry);
@@ -58,16 +81,57 @@ public final class EntityCreatorAnalyzer {
             }
         }
 
-        Map<String, Set<String>> result = new LinkedHashMap<>();
+        creatorIndex = new LinkedHashMap<>();
         for (Creation creation : creations) {
             if (!isSpawnableEntity(creation.created)) {
                 continue;
             }
-            result.computeIfAbsent(creation.created, ignored -> new LinkedHashSet<>()).add(creation.creator);
+            creatorIndex.computeIfAbsent(creation.created, ignored -> new LinkedHashSet<>()).add(creation.creator);
         }
-        LOGGER.info("OED creator analysis: {} classes scanned, {} creations found, {} created classes are spawnable entities",
-                hierarchy.size(), creations.size(), result.size());
-        return result;
+        buildBehaviorTargets();
+        LOGGER.info("OED creator analysis: {} classes scanned, {} creations found, {} created classes are spawnable entities, {} behavior targets found",
+                hierarchy.size(), creations.size(), creatorIndex.size(), behaviorTargets.size());
+        return creatorIndex;
+    }
+
+    /**
+     * Returns the living entities that (directly or transitively) create the given class.
+     * Recursively walks through intermediate spawnable entities such as projectiles.
+     */
+    public Set<String> creators(String created) {
+        analyze();
+        Set<String> creators = new LinkedHashSet<>();
+        Set<String> visited = new HashSet<>();
+        Queue<String> queue = new ArrayDeque<>();
+        queue.add(created);
+        while (!queue.isEmpty()) {
+            String current = queue.poll();
+            if (!visited.add(current)) {
+                continue;
+            }
+            Set<String> direct = creatorIndex.get(current);
+            if (direct == null) {
+                continue;
+            }
+            for (String creator : direct) {
+                if (isSpawnableEntity(creator)) {
+                    queue.add(creator);
+                } else if (isLivingEntity(creator)) {
+                    creators.add(creator);
+                }
+            }
+        }
+        return creators;
+    }
+
+    /**
+     * Returns the classes that directly instantiate the given class, without recursion.
+     * This exposes item/block/effect creators that would otherwise be skipped by
+     * {@link #creators(String)} because they are neither spawnable entities nor living entities.
+     */
+    public Set<String> directCreators(String created) {
+        analyze();
+        return creatorIndex.getOrDefault(created, Set.of());
     }
 
     private void scanDirectory(Path root) {
@@ -77,11 +141,11 @@ public final class EntityCreatorAnalyzer {
                     .forEach(path -> {
                         try (InputStream input = Files.newInputStream(path)) {
                             scanClass(input);
-                        } catch (IOException ignored) {
+                        } catch (IOException | RuntimeException e) {
+                            LOGGER.warn("OED creator analysis: failed to scan {}: {}", path, e.toString());
                         }
                     });
-        } catch (IOException ignored) {
-        } catch (UncheckedIOException ignored) {
+        } catch (IOException | UncheckedIOException ignored) {
         }
     }
 
@@ -95,9 +159,12 @@ public final class EntityCreatorAnalyzer {
                 }
                 try (InputStream input = jar.getInputStream(entry)) {
                     scanClass(input);
+                } catch (IOException | RuntimeException e) {
+                    LOGGER.warn("OED creator analysis: failed to scan {} from {}: {}", entry.getName(), jarPath, e.toString());
                 }
             }
-        } catch (IOException ignored) {
+        } catch (IOException | RuntimeException e) {
+            LOGGER.warn("OED creator analysis: failed to open jar {}: {}", jarPath, e.toString());
         }
     }
 
@@ -112,12 +179,37 @@ public final class EntityCreatorAnalyzer {
         reader.accept(classNode, ClassReader.SKIP_FRAMES | ClassReader.SKIP_CODE);
 
         String className = classNode.name.replace('/', '.');
-        hierarchy.put(className, new ClassInfo(classNode.superName, List.copyOf(classNode.interfaces)));
+        hierarchy.put(className, new ClassInfo(classNode.superName, List.copyOf(classNode.interfaces), classNode.signature));
 
         ClassReader codeReader = new ClassReader(bytes);
         ClassNode codeNode = new ClassNode();
         codeReader.accept(codeNode, ClassReader.SKIP_FRAMES);
         analyzeClassCode(className, codeNode);
+        analyzeClassFields(className, codeNode);
+    }
+
+    private void analyzeClassFields(String className, ClassNode classNode) {
+        String creator = outerClass(className);
+        for (org.objectweb.asm.tree.FieldNode field : classNode.fields) {
+            String target = parseEntityTypeTarget(field.signature);
+            if (target == null) {
+                target = parseEntityTypeTarget(field.desc);
+            }
+            if (target != null) {
+                creations.add(new Creation(creator, target.replace('/', '.')));
+            }
+        }
+    }
+
+    private static String parseEntityTypeTarget(String signature) {
+        if (signature == null) {
+            return null;
+        }
+        Matcher matcher = ENTITY_TYPE_PATTERN.matcher(signature);
+        if (!matcher.find()) {
+            return null;
+        }
+        return matcher.group(1);
     }
 
     private void analyzeClassCode(String className, ClassNode classNode) {
@@ -133,18 +225,16 @@ public final class EntityCreatorAnalyzer {
         }
     }
 
-    private boolean isSpawnableEntity(String className) {
+    public boolean isSpawnableEntity(String className) {
         if (className == null || className.startsWith("java/") || className.startsWith("javax/")) {
             return false;
         }
         String binary = className.replace('/', '.');
-        if (binary.startsWith("net.minecraft.world.entity.projectile.") || binary.contains(".entity.projectile.")) {
-            return extendsClass(binary, PROJECTILE_INTERNAL);
+        // Any Entity subclass that is not a LivingEntity can be a minion/projectile/effect.
+        if (!extendsClass(binary, ENTITY_INTERNAL)) {
+            return false;
         }
-        if (binary.startsWith("net.minecraft.world.entity.effect.") || binary.contains(".entity.effect.")) {
-            return extendsClass(binary, ENTITY_INTERNAL);
-        }
-        return extendsClass(binary, PROJECTILE_INTERNAL);
+        return !extendsClass(binary, LIVING_ENTITY_INTERNAL);
     }
 
     /**
@@ -153,6 +243,82 @@ public final class EntityCreatorAnalyzer {
      */
     public boolean isLivingEntity(String className) {
         return extendsClass(className.replace('.', '/'), LIVING_ENTITY_INTERNAL);
+    }
+
+    /**
+     * Returns a human-readable category for the given owner class.
+     */
+    public String ownerType(String className) {
+        String internal = className.replace('.', '/');
+        if (extendsClass(internal, LIVING_ENTITY_INTERNAL)) {
+            return "living";
+        }
+        if (extendsClass(internal, PROJECTILE_INTERNAL)) {
+            return "projectile";
+        }
+        if (extendsClass(internal, ENTITY_INTERNAL)) {
+            return "entity";
+        }
+        if (extendsClass(internal, ITEM_INTERNAL)) {
+            return "item";
+        }
+        if (extendsClass(internal, BLOCK_INTERNAL)) {
+            return "block";
+        }
+        if (extendsClass(internal, MOB_EFFECT_INTERNAL)) {
+            return "effect";
+        }
+        if (extendsClass(internal, BEHAVIOR_INTERNAL)) {
+            return "behavior";
+        }
+        return "other";
+    }
+
+    /**
+     * If the given class is an AI {@code Behavior<T>} (or inherits from one), returns the
+     * internal name of the target entity type {@code T}. This lets damage points owned by
+     * behavior classes be attributed back to the living entity they belong to.
+     */
+    public String behaviorTarget(String className) {
+        return behaviorTargets.get(className);
+    }
+
+    private void buildBehaviorTargets() {
+        for (Map.Entry<String, ClassInfo> entry : hierarchy.entrySet()) {
+            String target = findBehaviorTargetInHierarchy(entry.getKey());
+            if (target != null) {
+                behaviorTargets.put(entry.getKey(), target);
+            }
+        }
+    }
+
+    private String findBehaviorTargetInHierarchy(String className) {
+        Set<String> visited = new LinkedHashSet<>();
+        String current = className.replace('.', '/');
+        while (current != null && !visited.contains(current)) {
+            visited.add(current);
+            ClassInfo info = hierarchy.get(current.replace('/', '.'));
+            if (info == null) {
+                return null;
+            }
+            String target = parseBehaviorTarget(info.signature);
+            if (target != null) {
+                return target;
+            }
+            current = info.superName;
+        }
+        return null;
+    }
+
+    private static String parseBehaviorTarget(String signature) {
+        if (signature == null) {
+            return null;
+        }
+        Matcher matcher = BEHAVIOR_TARGET_PATTERN.matcher(signature);
+        if (!matcher.find()) {
+            return null;
+        }
+        return matcher.group(1).replace('/', '.');
     }
 
     private boolean extendsClass(String className, String targetInternal) {
@@ -228,7 +394,7 @@ public final class EntityCreatorAnalyzer {
         }
     }
 
-    private record ClassInfo(String superName, List<String> interfaces) {
+    private record ClassInfo(String superName, List<String> interfaces, String signature) {
     }
 
     private record Creation(String creator, String created) {
