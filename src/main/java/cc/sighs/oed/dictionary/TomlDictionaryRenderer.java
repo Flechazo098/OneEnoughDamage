@@ -18,8 +18,10 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.Comparator;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 
 public final class TomlDictionaryRenderer {
     private static final Logger LOGGER = LogUtils.getLogger();
@@ -29,6 +31,7 @@ public final class TomlDictionaryRenderer {
 
     public static void render(Map<String, Map<MobKey, List<DamagePointScanResult>>> groups, Path outputFile) {
         Map<String, Float> configuredValues = DamagePointTomlConfig.readValues(outputFile);
+        Set<String> writtenKeys = new LinkedHashSet<>();
         StringBuilder lines = new StringBuilder();
         lines.append("# OneEnoughDamage 硬编码伤害点配置字典\n");
         lines.append("# 改等号右侧的数字即可修改对应 attribute 的初始值，重启游戏后生效。\n");
@@ -53,7 +56,7 @@ public final class TomlDictionaryRenderer {
                     lines.append("（类型：").append(typeLabel).append("）");
                 }
                 lines.append("\n");
-                appendAttackDamageConfig(lines, configuredValues, key);
+                appendAttackDamageConfig(lines, configuredValues, writtenKeys, key);
 
                 List<DamagePointScanResult> points = entry.getValue();
                 points.sort(Comparator.comparing((DamagePointScanResult p) -> p.owner())
@@ -62,6 +65,7 @@ public final class TomlDictionaryRenderer {
                 for (DamagePointScanResult point : points) {
                     String attribute = point.attribute();
                     float value = configuredValues.getOrDefault(attribute, point.defaultDamage());
+                    writtenKeys.add(attribute);
                     lines.append("# 模式：").append(point.constant() ? "替换（r）" : "乘数（m）")
                             .append("，默认 ").append(point.defaultDamage())
                             .append("，伤害源 ").append(point.damageSource())
@@ -73,6 +77,7 @@ public final class TomlDictionaryRenderer {
                 lines.append("\n");
             }
         }
+        appendUnmatchedConfig(lines, configuredValues, writtenKeys);
 
         Pathway.tryOf(() -> {
                     Files.createDirectories(outputFile.getParent());
@@ -111,7 +116,7 @@ public final class TomlDictionaryRenderer {
         return value.replace("\\", "\\\\").replace("\"", "\\\"");
     }
 
-    private static void appendAttackDamageConfig(StringBuilder lines, Map<String, Float> configuredValues, MobKey key) {
+    private static void appendAttackDamageConfig(StringBuilder lines, Map<String, Float> configuredValues, Set<String> writtenKeys, MobKey key) {
         if (!"living".equals(key.type()) || key.entityId() == null || key.entityId().isBlank()) {
             return;
         }
@@ -120,11 +125,30 @@ public final class TomlDictionaryRenderer {
         attackDamageDefault(key.entityId())
                 .peek(defaultValue -> {
                     float value = configuredValues.getOrDefault(configKey, defaultValue);
+                    writtenKeys.add(configKey);
                     lines.append("# 原版近战基础伤害：只作用于 ").append(key.entityId()).append("\n");
                     lines.append("# Vanilla melee base damage: only applies to ").append(key.entityId()).append("\n");
                     lines.append('"').append(escapeTomlString(configKey)).append("\" = ")
                             .append(formatFloat(value)).append("\n");
                 });
+    }
+
+    private static void appendUnmatchedConfig(StringBuilder lines, Map<String, Float> configuredValues, Set<String> writtenKeys) {
+        List<Map.Entry<String, Float>> unmatched = configuredValues.entrySet().stream()
+                .filter(entry -> !writtenKeys.contains(entry.getKey()))
+                .sorted(Map.Entry.comparingByKey())
+                .toList();
+        if (unmatched.isEmpty()) {
+            return;
+        }
+
+        lines.append("# 未匹配旧配置\n");
+        lines.append("# 这些 key 来自旧 TOML，但本次扫描没有匹配到。可能是模组已删除、版本改名，或扫描结果变化。\n");
+        lines.append("# OED 不会自动删除它们；确认无用后可以手动删掉。\n");
+        for (Map.Entry<String, Float> entry : unmatched) {
+            lines.append('"').append(escapeTomlString(entry.getKey())).append("\" = ")
+                    .append(formatFloat(entry.getValue())).append("\n");
+        }
     }
 
     private static MaybePath<Float> attackDamageDefault(String entityId) {
