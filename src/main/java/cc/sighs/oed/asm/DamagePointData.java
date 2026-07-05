@@ -31,14 +31,15 @@ public final class DamagePointData {
             if (result.defaultDamage() == 0.0F || result.defaultDamage() == Float.MAX_VALUE) {
                 continue;
             }
+            String attributePath = stripNamespace(result.attribute());
             points.add(new DamagePoint(
                     result.owner(),
                     result.method(),
                     result.descriptor(),
                     result.ordinal(),
-                    result.defaultDamage(),
+                    DamagePointTomlConfig.configuredDamage(result.attribute(), result.defaultDamage()),
                     result.damageSource(),
-                    stripNamespace(result.attribute()),
+                    attributePath,
                     result.description(),
                     result.constant()
             ));

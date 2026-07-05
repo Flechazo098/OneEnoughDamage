@@ -37,6 +37,12 @@ public final class OwnerResolver {
             return resolved != null ? List.of(resolved) : List.of(fallbackOwner(owner));
         }
 
+        String outerLivingOwner = outerLivingOwner(owner);
+        if (outerLivingOwner != null) {
+            ResolvedOwner resolved = resolveDirectOwner(outerLivingOwner);
+            return resolved != null ? List.of(resolved) : List.of(fallbackOwner(outerLivingOwner));
+        }
+
         Set<String> creators = analyzer.creators(owner);
         if (!creators.isEmpty()) {
             List<ResolvedOwner> result = new ArrayList<>();
@@ -79,11 +85,23 @@ public final class OwnerResolver {
         if (analyzer.isLivingEntity(owner)) {
             return true;
         }
+        if (outerLivingOwner(owner) != null) {
+            return true;
+        }
         if (!analyzer.creators(owner).isEmpty()) {
             return true;
         }
         String behaviorTarget = analyzer.behaviorTarget(owner);
         return behaviorTarget != null && analyzer.isLivingEntity(behaviorTarget);
+    }
+
+    private String outerLivingOwner(String owner) {
+        int innerMarker = owner.indexOf('$');
+        if (innerMarker < 0) {
+            return null;
+        }
+        String outer = owner.substring(0, innerMarker);
+        return analyzer.isLivingEntity(outer) ? outer : null;
     }
 
     private ResolvedOwner resolveDirectOwner(String owner) {

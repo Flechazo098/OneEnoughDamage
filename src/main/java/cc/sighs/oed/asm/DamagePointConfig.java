@@ -12,13 +12,16 @@ import java.util.Properties;
 public final class DamagePointConfig {
     private static final Path CONFIG_FILE = Paths.get("config", "OED", "oneenoughdamage.properties");
     private static final String READ_CACHE_KEY = "readCache";
+    private static final String DEBUG_MODE_KEY = "debugMode";
     private static final String INFER_ATTRIBUTE_HOLDER_KEY = "inferAttributeHolder";
     private static final String INFER_ATTRIBUTE_HOLDER_SEARCH_RADIUS_KEY = "inferAttributeHolderSearchRadius";
     private static final boolean DEFAULT_READ_CACHE = false;
+    private static final boolean DEFAULT_DEBUG_MODE = false;
     private static final boolean DEFAULT_INFER_ATTRIBUTE_HOLDER = true;
     private static final double DEFAULT_INFER_ATTRIBUTE_HOLDER_SEARCH_RADIUS = 32.0D;
     private static final Properties PROPERTIES = loadProperties();
     private static final boolean READ_CACHE = booleanProperty(READ_CACHE_KEY, DEFAULT_READ_CACHE);
+    private static final boolean DEBUG_MODE = booleanProperty(DEBUG_MODE_KEY, DEFAULT_DEBUG_MODE);
     private static final boolean INFER_ATTRIBUTE_HOLDER = booleanProperty(INFER_ATTRIBUTE_HOLDER_KEY, DEFAULT_INFER_ATTRIBUTE_HOLDER);
     private static final double INFER_ATTRIBUTE_HOLDER_SEARCH_RADIUS = doubleProperty(
             INFER_ATTRIBUTE_HOLDER_SEARCH_RADIUS_KEY,
@@ -30,6 +33,10 @@ public final class DamagePointConfig {
 
     public static boolean readCache() {
         return READ_CACHE;
+    }
+
+    public static boolean debugMode() {
+        return DEBUG_MODE;
     }
 
     public static boolean inferAttributeHolder() {
@@ -73,6 +80,7 @@ public final class DamagePointConfig {
                 }
             }
             properties.putIfAbsent(READ_CACHE_KEY, Boolean.toString(DEFAULT_READ_CACHE));
+            properties.putIfAbsent(DEBUG_MODE_KEY, Boolean.toString(DEFAULT_DEBUG_MODE));
             properties.putIfAbsent(INFER_ATTRIBUTE_HOLDER_KEY, Boolean.toString(DEFAULT_INFER_ATTRIBUTE_HOLDER));
             properties.putIfAbsent(
                     INFER_ATTRIBUTE_HOLDER_SEARCH_RADIUS_KEY,

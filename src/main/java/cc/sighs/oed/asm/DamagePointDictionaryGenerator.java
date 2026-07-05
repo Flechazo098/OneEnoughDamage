@@ -4,6 +4,7 @@ import cc.sighs.oed.dictionary.MarkdownRenderer;
 import cc.sighs.oed.dictionary.MobKey;
 import cc.sighs.oed.dictionary.OwnerResolver;
 import cc.sighs.oed.dictionary.ResolvedOwner;
+import cc.sighs.oed.dictionary.TomlDictionaryRenderer;
 import cc.sighs.oed.scan.DamagePointScanResult;
 import cc.sighs.oed.scan.DamagePointScanner;
 import com.mojang.logging.LogUtils;
@@ -18,13 +19,14 @@ import java.util.TreeMap;
 import org.slf4j.Logger;
 
 /**
- * Generates a markdown dictionary from the scanned damage point cache.
+ * Generates config dictionaries from the scanned damage point cache.
  * Runs during common setup so that registries and language data are available.
  */
 public final class DamagePointDictionaryGenerator {
     private static final Logger LOGGER = LogUtils.getLogger();
     private static final Path CACHE_FILE = DamagePointScanner.cacheFile();
-    private static final Path OUTPUT_FILE = Paths.get("config", "OED", "damage-point-dictionary.md");
+    private static final Path DICTIONARY_FILE = Paths.get("config", "OED", "damage-point-dictionary.md");
+    private static final Path CONFIG_FILE = DamagePointTomlConfig.CONFIG_FILE;
     private static final Path UNATTRIBUTED_FILE = Paths.get("config", "OED", "damage-point-unattributed.md");
 
     private static OwnerResolver ownerResolver;
@@ -39,7 +41,9 @@ public final class DamagePointDictionaryGenerator {
         }
         try {
             long cacheTime = Files.getLastModifiedTime(CACHE_FILE).toMillis();
-            if (isUpToDate(OUTPUT_FILE, cacheTime) && isUpToDate(UNATTRIBUTED_FILE, cacheTime)) {
+            if (isUpToDate(DICTIONARY_FILE, cacheTime)
+                    && isUpToDate(CONFIG_FILE, cacheTime)
+                    && isUpToDate(UNATTRIBUTED_FILE, cacheTime)) {
                 LOGGER.info("OED dictionary: up to date");
                 return;
             }
@@ -80,12 +84,19 @@ public final class DamagePointDictionaryGenerator {
             }
         }
 
-        MarkdownRenderer.render("OneEnoughDamage 硬编码伤害点字典", null, attributed, OUTPUT_FILE);
+        MarkdownRenderer.render("OneEnoughDamage 硬编码伤害点字典", null, attributed, DICTIONARY_FILE);
+        TomlDictionaryRenderer.render(attributed, CONFIG_FILE);
         MarkdownRenderer.render("OneEnoughDamage 未归属伤害点汇总",
                 "以下伤害点无法追溯到某个 LivingEntity。每个条目标注了其最终来源类型（物品、弹射物、方块、效果等），运行时通常通过 Projectile Base Damage 或其他全局机制生效。",
                 unattributed, UNATTRIBUTED_FILE);
         long elapsed = (System.nanoTime() - start) / 1_000_000L;
-        LOGGER.info("OED dictionary generated at {} and {} in {} ms", OUTPUT_FILE, UNATTRIBUTED_FILE, elapsed);
+        LOGGER.info(
+                "OED dictionary generated at {}, {}, and {} in {} ms",
+                DICTIONARY_FILE,
+                CONFIG_FILE,
+                UNATTRIBUTED_FILE,
+                elapsed
+        );
     }
 
     private static OwnerResolver ownerResolver() {
@@ -94,4 +105,5 @@ public final class DamagePointDictionaryGenerator {
         }
         return ownerResolver;
     }
+
 }

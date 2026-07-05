@@ -1,6 +1,7 @@
 package cc.sighs.oed;
 
 import cc.sighs.oed.asm.DamagePointDictionaryGenerator;
+import cc.sighs.oed.asm.DamagePointTomlConfig;
 import com.mojang.logging.LogUtils;
 import net.minecraftforge.eventbus.api.IEventBus;
 import net.minecraftforge.fml.common.Mod;
@@ -20,6 +21,9 @@ public class OneEnoughDamage {
     }
 
     private void commonSetup(final FMLCommonSetupEvent event) {
-        event.enqueueWork(DamagePointDictionaryGenerator::generateIfNeeded);
+        event.enqueueWork(() -> {
+            DamagePointDictionaryGenerator.generateIfNeeded();
+            DamagePointTomlConfig.startWatcherIfNeeded();
+        });
     }
 }
