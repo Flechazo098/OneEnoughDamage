@@ -2,8 +2,7 @@ package cc.sighs.oed.asm;
 
 import cc.sighs.oed.scan.DamagePointScanResult;
 import cc.sighs.oed.scan.DamagePointScanner;
-import java.io.IOException;
-import java.nio.charset.StandardCharsets;
+
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
@@ -61,6 +60,7 @@ public final class DamagePointData {
         return separator < 0 ? id : id.substring(separator + 1);
     }
 
-    public record DamagePoint(String owner, String method, String descriptor, int ordinal, float defaultDamage, String damageSource, String attributePath, String description, boolean constant) {
+    public record DamagePoint(String owner, String method, String descriptor, int ordinal, float defaultDamage,
+                              String damageSource, String attributePath, String description, boolean constant) {
     }
 }

@@ -1,12 +1,14 @@
 package cc.sighs.oed;
 
+import cc.sighs.oed.api.event.EntityAttributeModificationCallback;
 import cc.sighs.oed.asm.DamagePointData;
 import cc.sighs.oed.asm.DamagePointTomlConfig;
-import java.util.LinkedHashMap;
-import java.util.Collection;
-import java.util.LinkedHashSet;
-import java.util.Map;
-import java.util.Set;
+import com.flechazo.hkt.business.control.MaybePath;
+import com.flechazo.hkt.business.core.Pathway;
+import net.fabricmc.fabric.api.event.lifecycle.v1.ServerEntityEvents;
+import net.fabricmc.fabric.api.event.lifecycle.v1.ServerLifecycleEvents;
+import net.minecraft.core.Registry;
+import net.minecraft.core.registries.BuiltInRegistries;
 import net.minecraft.resources.ResourceLocation;
 import net.minecraft.server.MinecraftServer;
 import net.minecraft.server.level.ServerLevel;
@@ -16,31 +18,18 @@ import net.minecraft.world.entity.LivingEntity;
 import net.minecraft.world.entity.ai.attributes.Attribute;
 import net.minecraft.world.entity.ai.attributes.AttributeInstance;
 import net.minecraft.world.entity.ai.attributes.RangedAttribute;
-import net.minecraftforge.event.entity.EntityJoinLevelEvent;
-import net.minecraftforge.event.entity.EntityAttributeModificationEvent;
-import net.minecraftforge.event.server.ServerStartedEvent;
-import net.minecraftforge.event.server.ServerStoppingEvent;
-import net.minecraftforge.eventbus.api.SubscribeEvent;
-import net.minecraftforge.fml.common.Mod;
-import net.minecraftforge.registries.DeferredRegister;
-import net.minecraftforge.registries.ForgeRegistries;
-import net.minecraftforge.registries.RegistryObject;
 
-@Mod.EventBusSubscriber(modid = OneEnoughDamage.MODID, bus = Mod.EventBusSubscriber.Bus.MOD)
+import java.util.*;
+
 public final class DamagePointAttributes {
-    public static final DeferredRegister<Attribute> ATTRIBUTES =
-            DeferredRegister.create(ForgeRegistries.ATTRIBUTES, OneEnoughDamage.MODID);
-    public static final RegistryObject<Attribute> PROJECTILE_BASE_DAMAGE = ATTRIBUTES.register(
-            "projectile_base_damage",
-            () -> new RangedAttribute(
-                    "oneenoughdamage.projectile_base_damage",
-                    -1.0D,
-                    -1.0D,
-                    2048.0D
-            ).setSyncable(true)
-    );
+    public static final Attribute PROJECTILE_BASE_DAMAGE = new RangedAttribute(
+            "oneenoughdamage.projectile_base_damage",
+            -1.0D,
+            -1.0D,
+            2048.0D
+    ).setSyncable(true);
 
-    private static final Map<DamagePointData.DamagePoint, RegistryObject<Attribute>> DAMAGE_POINT_ATTRIBUTES = registerDamagePointAttributes();
+    private static final Map<DamagePointData.DamagePoint, Attribute> DAMAGE_POINT_ATTRIBUTES = new LinkedHashMap<>();
     private static final Map<String, Double> CONFIGURED_DEFAULTS = configuredDefaults();
 
     static {
@@ -50,21 +39,52 @@ public final class DamagePointAttributes {
     private DamagePointAttributes() {
     }
 
-    private static Map<DamagePointData.DamagePoint, RegistryObject<Attribute>> registerDamagePointAttributes() {
-        Map<DamagePointData.DamagePoint, RegistryObject<Attribute>> attributes = new LinkedHashMap<>();
+    public static void register() {
+        Registry.register(BuiltInRegistries.ATTRIBUTE,
+                new ResourceLocation(OneEnoughDamage.MODID, "projectile_base_damage"),
+                PROJECTILE_BASE_DAMAGE);
+
         for (DamagePointData.DamagePoint point : DamagePointData.points()) {
-            RegistryObject<Attribute> attribute = ATTRIBUTES.register(
-                    point.attributePath(),
-                    () -> new RangedAttribute(
-                            point.description(),
-                            point.defaultDamage(),
-                            0.0D,
-                            2048.0D
-                    ).setSyncable(true)
-            );
-            attributes.put(point, attribute);
+            Attribute attribute = new RangedAttribute(
+                    point.description(),
+                    point.defaultDamage(),
+                    0.0D,
+                    2048.0D
+            ).setSyncable(true);
+            Registry.register(BuiltInRegistries.ATTRIBUTE,
+                    new ResourceLocation(OneEnoughDamage.MODID, point.attributePath()),
+                    attribute);
+            DAMAGE_POINT_ATTRIBUTES.put(point, attribute);
         }
-        return attributes;
+
+        // Register to add custom attributes to all living entity types (like Forge's EntityAttributeModificationEvent)
+        EntityAttributeModificationCallback.EVENT.register(attributes -> {
+            for (EntityType<? extends LivingEntity> entityType : attributes.getTypes()) {
+                if (!attributes.has(entityType, PROJECTILE_BASE_DAMAGE)) {
+                    attributes.add(entityType, PROJECTILE_BASE_DAMAGE);
+                }
+                for (Attribute attribute : DAMAGE_POINT_ATTRIBUTES.values()) {
+                    if (!attributes.has(entityType, attribute)) {
+                        attributes.add(entityType, attribute);
+                    }
+                }
+            }
+        });
+
+        ServerEntityEvents.ENTITY_LOAD.register((entity, world) -> {
+            if (!world.isClientSide() && entity instanceof LivingEntity living) {
+                Set<String> attributeIds = new LinkedHashSet<>(CONFIGURED_DEFAULTS.keySet());
+                attributeIds.addAll(DamagePointTomlConfig.configuredKeys());
+                RuntimeSync.syncEntity(living, attributeIds);
+            }
+        });
+
+        ServerLifecycleEvents.SERVER_STARTED.register(server -> RuntimeSync.server = server);
+        ServerLifecycleEvents.SERVER_STOPPING.register(server -> RuntimeSync.server = null);
+    }
+
+    public static Collection<Attribute> getDamagePointAttributes() {
+        return DAMAGE_POINT_ATTRIBUTES.values();
     }
 
     private static Map<String, Double> configuredDefaults() {
@@ -75,46 +95,10 @@ public final class DamagePointAttributes {
         return Map.copyOf(defaults);
     }
 
-    @SubscribeEvent
-    public static void onEntityAttributeModification(EntityAttributeModificationEvent event) {
-        for (EntityType<? extends LivingEntity> entityType : event.getTypes()) {
-            if (!event.has(entityType, PROJECTILE_BASE_DAMAGE.get())) {
-                event.add(entityType, PROJECTILE_BASE_DAMAGE.get());
-            }
-            for (RegistryObject<Attribute> attribute : DAMAGE_POINT_ATTRIBUTES.values()) {
-                if (!event.has(entityType, attribute.get())) {
-                    event.add(entityType, attribute.get());
-                }
-            }
-        }
-    }
-
-    @Mod.EventBusSubscriber(modid = OneEnoughDamage.MODID, bus = Mod.EventBusSubscriber.Bus.FORGE)
-    public static final class RuntimeSync {
+    static final class RuntimeSync {
         private static volatile MinecraftServer server;
 
         private RuntimeSync() {
-        }
-
-        @SubscribeEvent
-        public static void onServerStarted(ServerStartedEvent event) {
-            server = event.getServer();
-        }
-
-        @SubscribeEvent
-        public static void onServerStopping(ServerStoppingEvent event) {
-            server = null;
-        }
-
-        @SubscribeEvent
-        public static void onEntityJoinLevel(EntityJoinLevelEvent event) {
-            if (event.getLevel().isClientSide() || !(event.getEntity() instanceof LivingEntity living)) {
-                return;
-            }
-
-            Set<String> attributeIds = new LinkedHashSet<>(CONFIGURED_DEFAULTS.keySet());
-            attributeIds.addAll(DamagePointTomlConfig.configuredKeys());
-            syncEntity(living, attributeIds);
         }
 
         private static void syncConfiguredAttributes(Collection<String> attributeIds) {
@@ -134,60 +118,49 @@ public final class DamagePointAttributes {
 
         private static void syncEntity(LivingEntity living, Collection<String> attributeIds) {
             for (String attributeId : attributeIds) {
-                ConfiguredAttributeKey key = ConfiguredAttributeKey.parse(attributeId);
-                if (key == null || !key.matches(living)) {
-                    continue;
-                }
-
-                ResourceLocation id = ResourceLocation.tryParse(key.attributeId());
-                if (id == null) {
-                    continue;
-                }
-                Double fallback = CONFIGURED_DEFAULTS.get(key.attributeId());
-                Float configured = DamagePointTomlConfig.configuredValue(attributeId);
-                if (fallback == null) {
-                    if (configured == null) {
-                        continue;
-                    }
-                    fallback = (double) configured;
-                }
-
-                Attribute attribute = ForgeRegistries.ATTRIBUTES.getValue(id);
-                if (attribute == null) {
-                    continue;
-                }
-
-                AttributeInstance instance = living.getAttribute(attribute);
-                if (instance == null) {
-                    continue;
-                }
-
-                double value = configured == null ? fallback : configured;
-                if (Double.compare(instance.getBaseValue(), value) != 0) {
-                    instance.setBaseValue(value);
-                }
+                ConfiguredAttributeKey.parse(attributeId)
+                        .filter(key -> key.matches(living))
+                        .via(key -> Pathway.nullable(ResourceLocation.tryParse(key.attributeId()))
+                                .via(id -> Pathway.nullable(BuiltInRegistries.ATTRIBUTE.get(id)))
+                                .via(attribute -> Pathway.nullable(living.getAttribute(attribute)))
+                                .zipWith(configuredValue(attributeId, key.attributeId()), AttributeSync::new))
+                        .peek(sync -> {
+                            if (Double.compare(sync.instance().getBaseValue(), sync.value()) != 0) {
+                                sync.instance().setBaseValue(sync.value());
+                            }
+                        });
             }
         }
 
+        private static MaybePath<Double> configuredValue(String attributeId, String defaultKey) {
+            Float configured = DamagePointTomlConfig.configuredValue(attributeId);
+            return configured == null
+                    ? Pathway.nullable(CONFIGURED_DEFAULTS.get(defaultKey))
+                    : Pathway.just((double) configured);
+        }
+
+        private record AttributeSync(AttributeInstance instance, double value) {
+        }
+
         private record ConfiguredAttributeKey(String attributeId, String entityId) {
-            private static ConfiguredAttributeKey parse(String value) {
+            private static MaybePath<ConfiguredAttributeKey> parse(String value) {
                 int entitySeparator = value.indexOf('@');
                 if (entitySeparator < 0) {
-                    return new ConfiguredAttributeKey(value, null);
+                    return Pathway.just(new ConfiguredAttributeKey(value, null));
                 }
                 String attributeId = value.substring(0, entitySeparator);
                 String entityId = value.substring(entitySeparator + 1);
                 if (attributeId.isBlank() || entityId.isBlank()) {
-                    return null;
+                    return Pathway.nothing();
                 }
-                return new ConfiguredAttributeKey(attributeId, entityId);
+                return Pathway.just(new ConfiguredAttributeKey(attributeId, entityId));
             }
 
             private boolean matches(LivingEntity living) {
                 if (entityId == null) {
                     return true;
                 }
-                ResourceLocation typeId = ForgeRegistries.ENTITY_TYPES.getKey(living.getType());
+                ResourceLocation typeId = BuiltInRegistries.ENTITY_TYPE.getKey(living.getType());
                 return typeId != null && entityId.equals(typeId.toString());
             }
         }

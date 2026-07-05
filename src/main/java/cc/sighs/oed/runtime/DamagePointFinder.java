@@ -1,11 +1,11 @@
 package cc.sighs.oed.runtime;
 
 import cc.sighs.oed.asm.DamagePointData;
-import java.util.ArrayList;
-import java.util.Comparator;
-import java.util.HashMap;
-import java.util.List;
-import java.util.Map;
+import cc.sighs.oed.scan.DamagePointScanner;
+import com.flechazo.hkt.business.control.MaybePath;
+import com.flechazo.hkt.business.core.Pathway;
+
+import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
 
 public final class DamagePointFinder {
@@ -17,7 +17,7 @@ public final class DamagePointFinder {
         this.damagePointsByCaller = buildDamagePointIndex(points);
     }
 
-    public DamagePointData.DamagePoint find(String damageSource, float amount) {
+    public MaybePath<DamagePointData.DamagePoint> find(String damageSource, float amount) {
         for (Caller caller : findDamageCallers()) {
             List<DamagePointData.DamagePoint> points = damagePointsByCaller.get(caller.key());
             if (points == null) {
@@ -35,12 +35,12 @@ public final class DamagePointFinder {
                 continue;
             }
             if (matches.size() == 1) {
-                return matches.get(0);
+                return Pathway.just(matches.getFirst());
             }
 
             return findByObservedCallSite(caller, matches);
         }
-        return null;
+        return Pathway.nothing();
     }
 
     private static boolean damageSourceMatches(String scannedSource, String runtimeSource) {
@@ -48,18 +48,10 @@ public final class DamagePointFinder {
     }
 
     private static String camelToSnake(String value) {
-        StringBuilder result = new StringBuilder();
-        for (int i = 0; i < value.length(); i++) {
-            char c = value.charAt(i);
-            if (Character.isUpperCase(c) && i > 0) {
-                result.append('_');
-            }
-            result.append(Character.toLowerCase(c));
-        }
-        return result.toString();
+        return DamagePointScanner.camelToSnake(value);
     }
 
-    private DamagePointData.DamagePoint findByObservedCallSite(Caller caller, List<DamagePointData.DamagePoint> matches) {
+    private MaybePath<DamagePointData.DamagePoint> findByObservedCallSite(Caller caller, List<DamagePointData.DamagePoint> matches) {
         String key = caller.key();
         List<Integer> callSites = observedCallSites.computeIfAbsent(key, ignored -> new ArrayList<>());
         int callSiteIndex;
@@ -69,13 +61,15 @@ public final class DamagePointFinder {
                 callSites.sort(Integer::compareTo);
             }
             if (caller.byteCodeIndex() < 0 || callSites.size() < matches.size()) {
-                return null;
+                return Pathway.nothing();
             }
             callSiteIndex = callSites.indexOf(caller.byteCodeIndex());
         }
 
         matches.sort(Comparator.comparingInt(DamagePointData.DamagePoint::ordinal));
-        return callSiteIndex >= 0 && callSiteIndex < matches.size() ? matches.get(callSiteIndex) : null;
+        return callSiteIndex >= 0 && callSiteIndex < matches.size()
+                ? Pathway.just(matches.get(callSiteIndex))
+                : Pathway.nothing();
     }
 
     private List<Caller> findDamageCallers() {

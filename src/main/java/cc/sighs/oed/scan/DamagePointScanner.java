@@ -1,43 +1,28 @@
 package cc.sighs.oed.scan;
 
 import cc.sighs.oed.asm.DamagePointConfig;
+import com.flechazo.hkt.business.core.Pathway;
 import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
 import com.google.gson.JsonParser;
 import com.mojang.logging.LogUtils;
+import org.objectweb.asm.ClassReader;
+import org.objectweb.asm.Opcodes;
+import org.objectweb.asm.tree.*;
+import org.slf4j.Logger;
+
 import java.io.BufferedReader;
 import java.io.File;
-import java.io.IOException;
 import java.io.InputStream;
 import java.io.InputStreamReader;
-import java.io.UncheckedIOException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
-import java.util.ArrayList;
-import java.util.LinkedHashSet;
-import java.util.List;
-import java.util.Locale;
-import java.util.Set;
+import java.util.*;
 import java.util.jar.JarEntry;
 import java.util.jar.JarFile;
 import java.util.stream.Stream;
-import org.objectweb.asm.ClassReader;
-import org.objectweb.asm.Opcodes;
-import org.objectweb.asm.tree.AbstractInsnNode;
-import org.objectweb.asm.tree.ClassNode;
-import org.objectweb.asm.tree.FrameNode;
-import org.objectweb.asm.tree.IincInsnNode;
-import org.objectweb.asm.tree.IntInsnNode;
-import org.objectweb.asm.tree.LabelNode;
-import org.objectweb.asm.tree.LdcInsnNode;
-import org.objectweb.asm.tree.LineNumberNode;
-import org.objectweb.asm.tree.MethodInsnNode;
-import org.objectweb.asm.tree.MethodNode;
-import org.objectweb.asm.tree.TypeInsnNode;
-import org.objectweb.asm.tree.VarInsnNode;
-import org.slf4j.Logger;
 
 public final class DamagePointScanner {
     private static final Logger LOGGER = LogUtils.getLogger();
@@ -96,64 +81,65 @@ public final class DamagePointScanner {
         if (!Files.isRegularFile(CACHE_FILE)) {
             return List.of();
         }
-        try (InputStream input = Files.newInputStream(CACHE_FILE);
-             BufferedReader reader = new BufferedReader(new InputStreamReader(input, StandardCharsets.UTF_8))) {
-            JsonObject root = JsonParser.parseReader(reader).getAsJsonObject();
-            List<DamagePointScanResult> points = new ArrayList<>();
-            for (JsonElement element : root.getAsJsonArray("points")) {
-                JsonObject object = element.getAsJsonObject();
-                points.add(new DamagePointScanResult(
-                        getString(object, "owner"),
-                        getString(object, "method"),
-                        getString(object, "descriptor"),
-                        getInt(object, "ordinal"),
-                        getFloat(object, "default"),
-                        getString(object, "damageSource"),
-                        getBoolean(object, "transformed"),
-                        getBoolean(object, "constant")
-                ));
-            }
-            return points;
-        } catch (IOException | RuntimeException e) {
-            LOGGER.error("OED scanner: failed to read cache", e);
-            return List.of();
-        }
+        return Pathway.tryOf(() -> {
+                    try (InputStream input = Files.newInputStream(CACHE_FILE);
+                         BufferedReader reader = new BufferedReader(new InputStreamReader(input, StandardCharsets.UTF_8))) {
+                        JsonObject root = JsonParser.parseReader(reader).getAsJsonObject();
+                        List<DamagePointScanResult> points = new ArrayList<>();
+                        for (JsonElement element : root.getAsJsonArray("points")) {
+                            JsonObject object = element.getAsJsonObject();
+                            points.add(new DamagePointScanResult(
+                                    getString(object, "owner"),
+                                    getString(object, "method"),
+                                    getString(object, "descriptor"),
+                                    getInt(object, "ordinal"),
+                                    getFloat(object, "default"),
+                                    getString(object, "damageSource"),
+                                    getBoolean(object, "transformed"),
+                                    getBoolean(object, "constant")
+                            ));
+                        }
+                        return points;
+                    }
+                })
+                .peekFailure(error -> LOGGER.error("OED scanner: failed to read cache", error))
+                .getOrElse(List.of());
     }
 
     private void scanDirectory(Path root) {
-        try (Stream<Path> stream = Files.walk(root)) {
-            stream.filter(Files::isRegularFile)
-                    .filter(path -> path.toString().endsWith(".class"))
-                    .forEach(path -> {
-                        try (InputStream input = Files.newInputStream(path)) {
-                            scanClass(input);
-                        } catch (IOException | RuntimeException ignored) {
-                        }
-                    });
-        } catch (IOException ignored) {
-        } catch (UncheckedIOException ignored) {
-        }
+        Pathway.tryOf(() -> {
+            try (Stream<Path> stream = Files.walk(root)) {
+                stream.filter(Files::isRegularFile)
+                        .filter(path -> path.toString().endsWith(".class"))
+                        .forEach(path -> Pathway.tryOf(() -> Files.readAllBytes(path))
+                                .peek(this::scanClass));
+            }
+            return root;
+        });
     }
 
     private void scanJar(Path jarPath) {
-        try (JarFile jar = new JarFile(jarPath.toFile())) {
-            var entries = jar.entries();
-            while (entries.hasMoreElements()) {
-                JarEntry entry = entries.nextElement();
-                if (entry.isDirectory() || !entry.getName().endsWith(".class")) {
-                    continue;
-                }
-                try (InputStream input = jar.getInputStream(entry)) {
-                    scanClass(input);
-                } catch (IOException | RuntimeException ignored) {
+        Pathway.tryOf(() -> {
+            try (JarFile jar = new JarFile(jarPath.toFile())) {
+                var entries = jar.entries();
+                while (entries.hasMoreElements()) {
+                    JarEntry entry = entries.nextElement();
+                    if (entry.isDirectory() || !entry.getName().endsWith(".class")) {
+                        continue;
+                    }
+                    Pathway.tryOf(() -> {
+                                try (InputStream input = jar.getInputStream(entry)) {
+                                    return input.readAllBytes();
+                                }
+                            })
+                            .peek(this::scanClass);
                 }
             }
-        } catch (IOException ignored) {
-        }
+            return jarPath;
+        });
     }
 
-    private void scanClass(InputStream input) throws IOException {
-        byte[] bytes = input.readAllBytes();
+    private void scanClass(byte[] bytes) {
         if (bytes.length == 0) {
             return;
         }
@@ -238,7 +224,8 @@ public final class DamagePointScanner {
         }
 
         return switch (instruction.getOpcode()) {
-            case Opcodes.FLOAD -> instruction instanceof VarInsnNode varInsn ? resolveStoredFloat(method, instruction, varInsn.var, depth + 1) : null;
+            case Opcodes.FLOAD ->
+                    instruction instanceof VarInsnNode varInsn ? resolveStoredFloat(method, instruction, varInsn.var, depth + 1) : null;
             case Opcodes.I2F -> {
                 Integer value = resolvePreviousInt(method, instruction, depth + 1);
                 yield value == null ? null : (float) value;
@@ -247,7 +234,8 @@ public final class DamagePointScanner {
                 Float value = resolvePreviousFloat(method, instruction, depth + 1);
                 yield value == null ? null : -value;
             }
-            case Opcodes.FADD, Opcodes.FSUB, Opcodes.FMUL, Opcodes.FDIV -> resolveBinaryFloat(method, instruction, depth + 1);
+            case Opcodes.FADD, Opcodes.FSUB, Opcodes.FMUL, Opcodes.FDIV ->
+                    resolveBinaryFloat(method, instruction, depth + 1);
             default -> null;
         };
     }
@@ -274,7 +262,8 @@ public final class DamagePointScanner {
         }
 
         return switch (previous.getOpcode()) {
-            case Opcodes.ILOAD -> previous instanceof VarInsnNode varInsn ? resolveStoredInt(method, previous, varInsn.var, depth + 1) : null;
+            case Opcodes.ILOAD ->
+                    previous instanceof VarInsnNode varInsn ? resolveStoredInt(method, previous, varInsn.var, depth + 1) : null;
             default -> null;
         };
     }
@@ -289,7 +278,8 @@ public final class DamagePointScanner {
             case Opcodes.ICONST_4 -> 4;
             case Opcodes.ICONST_5 -> 5;
             case Opcodes.BIPUSH, Opcodes.SIPUSH -> instruction instanceof IntInsnNode intInsn ? intInsn.operand : null;
-            case Opcodes.LDC -> instruction instanceof LdcInsnNode ldc && ldc.cst instanceof Integer value ? value : null;
+            case Opcodes.LDC ->
+                    instruction instanceof LdcInsnNode ldc && ldc.cst instanceof Integer value ? value : null;
             default -> null;
         };
     }
@@ -388,13 +378,13 @@ public final class DamagePointScanner {
     }
 
     private void writeCache() {
-        try {
-            Files.createDirectories(CACHE_FILE.getParent());
-            Files.writeString(CACHE_FILE, toJson(), StandardCharsets.UTF_8);
-            LOGGER.info("OED scanner: wrote cache with {} points to {}", scanResults.size(), CACHE_FILE);
-        } catch (IOException e) {
-            LOGGER.error("OED scanner: failed to write cache", e);
-        }
+        Pathway.tryOf(() -> {
+                    Files.createDirectories(CACHE_FILE.getParent());
+                    Files.writeString(CACHE_FILE, toJson(), StandardCharsets.UTF_8);
+                    return CACHE_FILE;
+                })
+                .peek(file -> LOGGER.info("OED scanner: wrote cache with {} points to {}", scanResults.size(), file))
+                .peekFailure(error -> LOGGER.error("OED scanner: failed to write cache", error));
     }
 
     private String toJson() {
@@ -478,12 +468,12 @@ public final class DamagePointScanner {
         if (legacyClasspathFile != null && !legacyClasspathFile.isBlank()) {
             Path path = Paths.get(legacyClasspathFile);
             if (Files.isRegularFile(path)) {
-                try {
-                    for (String line : Files.readAllLines(path, StandardCharsets.UTF_8)) {
-                        addClasspathEntry(entries, line);
-                    }
-                } catch (IOException ignored) {
-                }
+                Pathway.tryOf(() -> Files.readAllLines(path, StandardCharsets.UTF_8))
+                        .peek(lines -> {
+                            for (String line : lines) {
+                                addClasspathEntry(entries, line);
+                            }
+                        });
             }
         }
 

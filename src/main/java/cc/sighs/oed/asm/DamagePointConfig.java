@@ -1,6 +1,7 @@
 package cc.sighs.oed.asm;
 
-import java.io.IOException;
+import com.flechazo.hkt.business.core.Pathway;
+
 import java.io.Reader;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
@@ -50,10 +51,12 @@ public final class DamagePointConfig {
         ensureConfigFile();
 
         Properties properties = new Properties();
-        try (Reader reader = Files.newBufferedReader(CONFIG_FILE, StandardCharsets.UTF_8)) {
-            properties.load(reader);
-        } catch (IOException ignored) {
-        }
+        Pathway.tryOf(() -> {
+            try (Reader reader = Files.newBufferedReader(CONFIG_FILE, StandardCharsets.UTF_8)) {
+                properties.load(reader);
+                return properties;
+            }
+        });
         return properties;
     }
 
@@ -62,15 +65,12 @@ public final class DamagePointConfig {
     }
 
     private static double doubleProperty(String key, double defaultValue) {
-        try {
-            return Double.parseDouble(PROPERTIES.getProperty(key, Double.toString(defaultValue)));
-        } catch (NumberFormatException ignored) {
-            return defaultValue;
-        }
+        return Pathway.tryOf(() -> Double.parseDouble(PROPERTIES.getProperty(key, Double.toString(defaultValue))))
+                .getOrElse(defaultValue);
     }
 
     private static void ensureConfigFile() {
-        try {
+        Pathway.tryOf(() -> {
             Files.createDirectories(CONFIG_FILE.getParent());
             Properties properties = new Properties();
             if (Files.isRegularFile(CONFIG_FILE)) {
@@ -86,8 +86,8 @@ public final class DamagePointConfig {
                     Double.toString(DEFAULT_INFER_ATTRIBUTE_HOLDER_SEARCH_RADIUS)
             );
             Files.writeString(CONFIG_FILE, renderConfig(properties), StandardCharsets.UTF_8);
-        } catch (IOException ignored) {
-        }
+            return properties;
+        });
     }
 
     private static String renderConfig(Properties properties) {
@@ -111,7 +111,7 @@ public final class DamagePointConfig {
                 #
                 # Boolean values use true or false.
                 # 布尔值使用 true 或 false。
-
+                
                 # readCache
                 # If true, reuse config/OED/damage_points-cache.json when it already exists.
                 # If false, rescan the classpath on startup and rewrite the damage point cache.
@@ -119,7 +119,7 @@ public final class DamagePointConfig {
                 # 如果为 false，每次启动都会重新扫描 classpath，并重写伤害点缓存。
                 # Default / 默认: false
                 readCache=%s
-
+                
                 # debugMode
                 # Enables development/debug behavior for live TOML tuning.
                 # When enabled, OED mixes into Attribute#getDefaultValue, watches damage-point-dictionary.toml,
@@ -131,7 +131,7 @@ public final class DamagePointConfig {
                 # 这个开关本身只在启动时读取；修改它需要重启。
                 # Default / 默认: false
                 debugMode=%s
-
+                
                 # inferAttributeHolder
                 # If a damage point has no direct LivingEntity attacker, try to infer the owner entity nearby.
                 # This is useful for AI goals, delayed effects, summoned entities, and other indirect damage.
@@ -139,7 +139,7 @@ public final class DamagePointConfig {
                 # 这对 AI Goal、延迟效果、召唤实体等间接伤害有用。
                 # Default / 默认: true
                 inferAttributeHolder=%s
-
+                
                 # inferAttributeHolderSearchRadius
                 # Search radius used by inferAttributeHolder, in blocks.
                 # Larger values can attribute more indirect damage, but may choose the wrong nearby entity.

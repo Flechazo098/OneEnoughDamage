@@ -1,16 +1,16 @@
 package cc.sighs.oed.dictionary;
 
 import cc.sighs.oed.scan.DamagePointScanResult;
+import com.flechazo.hkt.business.core.Pathway;
 import com.mojang.logging.LogUtils;
-import java.io.IOException;
-import java.io.Writer;
+import org.slf4j.Logger;
+
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.Comparator;
 import java.util.List;
 import java.util.Map;
-import org.slf4j.Logger;
 
 public final class MarkdownRenderer {
     private static final Logger LOGGER = LogUtils.getLogger();
@@ -45,9 +45,9 @@ public final class MarkdownRenderer {
                             .append("（").append(escapeMarkdown(key.zhName())).append("）").append(typeSuffix).append("\n\n");
                 }
                 List<DamagePointScanResult> points = entry.getValue();
-                points.sort(Comparator.comparing((DamagePointScanResult p) -> p.owner())
-                        .thenComparing(p -> p.method())
-                        .thenComparingInt(p -> p.ordinal()));
+                points.sort(Comparator.comparing(DamagePointScanResult::owner)
+                        .thenComparing(DamagePointScanResult::method)
+                        .thenComparingInt(DamagePointScanResult::ordinal));
                 for (DamagePointScanResult point : points) {
                     String mode = point.constant() ? "替换（r）" : "乘数（m）";
                     lines.append("- `").append(point.attribute()).append("`  <!-- 模式：").append(mode)
@@ -59,15 +59,13 @@ public final class MarkdownRenderer {
             }
         }
 
-        try {
-            Files.createDirectories(outputFile.getParent());
-            try (Writer writer = Files.newBufferedWriter(outputFile, StandardCharsets.UTF_8)) {
-                writer.write(lines.toString());
-            }
-            LOGGER.info("OED dictionary: wrote markdown to {}", outputFile);
-        } catch (IOException e) {
-            LOGGER.error("OED dictionary: failed to write markdown", e);
-        }
+        Pathway.tryOf(() -> {
+                    Files.createDirectories(outputFile.getParent());
+                    Files.writeString(outputFile, lines.toString(), StandardCharsets.UTF_8);
+                    return outputFile;
+                })
+                .peek(file -> LOGGER.info("OED dictionary: wrote markdown to {}", file))
+                .peekFailure(error -> LOGGER.error("OED dictionary: failed to write markdown", error));
     }
 
     private static String typeLabel(String type) {

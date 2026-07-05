@@ -1,37 +1,27 @@
 package cc.sighs.oed.asm;
 
+import com.flechazo.hkt.business.core.Pathway;
 import com.mojang.logging.LogUtils;
-import java.io.File;
-import java.io.IOException;
-import java.io.InputStream;
-import java.io.UncheckedIOException;
-import java.nio.charset.StandardCharsets;
-import java.nio.file.Files;
-import java.nio.file.Path;
-import java.nio.file.Paths;
-import java.util.ArrayDeque;
-import java.util.ArrayList;
-import java.util.HashSet;
-import java.util.LinkedHashMap;
-import java.util.LinkedHashSet;
-import java.util.List;
-import java.util.Map;
-import java.util.Queue;
-import java.util.Set;
-import java.util.jar.JarEntry;
-import java.util.jar.JarFile;
-import java.util.regex.Matcher;
-import java.util.regex.Pattern;
-import java.util.stream.Stream;
 import org.objectweb.asm.ClassReader;
 import org.objectweb.asm.Opcodes;
-import org.objectweb.asm.signature.SignatureReader;
-import org.objectweb.asm.signature.SignatureVisitor;
 import org.objectweb.asm.tree.AbstractInsnNode;
 import org.objectweb.asm.tree.ClassNode;
 import org.objectweb.asm.tree.MethodNode;
 import org.objectweb.asm.tree.TypeInsnNode;
 import org.slf4j.Logger;
+
+import java.io.File;
+import java.io.InputStream;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.Paths;
+import java.util.*;
+import java.util.jar.JarEntry;
+import java.util.jar.JarFile;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
+import java.util.stream.Stream;
 
 /**
  * Static bytecode analyzer that finds which living-entity-like classes create projectiles,
@@ -135,41 +125,43 @@ public final class EntityCreatorAnalyzer {
     }
 
     private void scanDirectory(Path root) {
-        try (Stream<Path> stream = Files.walk(root)) {
-            stream.filter(Files::isRegularFile)
-                    .filter(path -> path.toString().endsWith(".class"))
-                    .forEach(path -> {
-                        try (InputStream input = Files.newInputStream(path)) {
-                            scanClass(input);
-                        } catch (IOException | RuntimeException e) {
-                            LOGGER.warn("OED creator analysis: failed to scan {}: {}", path, e.toString());
-                        }
-                    });
-        } catch (IOException | UncheckedIOException ignored) {
-        }
+        Pathway.tryOf(() -> {
+            try (Stream<Path> stream = Files.walk(root)) {
+                stream.filter(Files::isRegularFile)
+                        .filter(path -> path.toString().endsWith(".class"))
+                        .forEach(path -> Pathway.tryOf(() -> Files.readAllBytes(path))
+                                .peek(this::scanClass)
+                                .peekFailure(error -> LOGGER.warn("OED creator analysis: failed to scan {}: {}", path, error.toString())));
+            }
+            return root;
+        });
     }
 
     private void scanJar(Path jarPath) {
-        try (JarFile jar = new JarFile(jarPath.toFile())) {
-            var entries = jar.entries();
-            while (entries.hasMoreElements()) {
-                JarEntry entry = entries.nextElement();
-                if (entry.isDirectory() || !entry.getName().endsWith(".class")) {
-                    continue;
-                }
-                try (InputStream input = jar.getInputStream(entry)) {
-                    scanClass(input);
-                } catch (IOException | RuntimeException e) {
-                    LOGGER.warn("OED creator analysis: failed to scan {} from {}: {}", entry.getName(), jarPath, e.toString());
-                }
-            }
-        } catch (IOException | RuntimeException e) {
-            LOGGER.warn("OED creator analysis: failed to open jar {}: {}", jarPath, e.toString());
-        }
+        Pathway.tryOf(() -> {
+                            try (JarFile jar = new JarFile(jarPath.toFile())) {
+                                var entries = jar.entries();
+                                while (entries.hasMoreElements()) {
+                                    JarEntry entry = entries.nextElement();
+                                    if (entry.isDirectory() || !entry.getName().endsWith(".class")) {
+                                        continue;
+                                    }
+                                    Pathway.tryOf(() -> {
+                                                try (InputStream input = jar.getInputStream(entry)) {
+                                                    return input.readAllBytes();
+                                                }
+                                            })
+                                            .peek(this::scanClass)
+                                            .peekFailure(error -> LOGGER.warn("OED creator analysis: failed to scan {} from {}: {}", entry.getName(), jarPath, error.toString()));
+                                }
+                            }
+                            return jarPath;
+                        }
+                )
+                .peekFailure(error -> LOGGER.warn("OED creator analysis: failed to open jar {}: {}", jarPath, error.toString()));
     }
 
-    private void scanClass(InputStream input) throws IOException {
-        byte[] bytes = input.readAllBytes();
+    private void scanClass(byte[] bytes) {
         if (bytes.length == 0) {
             return;
         }
@@ -362,12 +354,12 @@ public final class EntityCreatorAnalyzer {
         if (legacyClasspathFile != null && !legacyClasspathFile.isBlank()) {
             Path path = Paths.get(legacyClasspathFile);
             if (Files.isRegularFile(path)) {
-                try {
-                    for (String line : Files.readAllLines(path, StandardCharsets.UTF_8)) {
-                        addClasspathEntry(entries, line);
-                    }
-                } catch (IOException ignored) {
-                }
+                Pathway.tryOf(() -> Files.readAllLines(path, StandardCharsets.UTF_8))
+                        .peek(lines -> {
+                            for (String line : lines) {
+                                addClasspathEntry(entries, line);
+                            }
+                        });
             }
         }
 

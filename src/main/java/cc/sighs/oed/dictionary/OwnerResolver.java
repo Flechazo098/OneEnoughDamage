@@ -1,22 +1,19 @@
 package cc.sighs.oed.dictionary;
 
 import cc.sighs.oed.asm.EntityCreatorAnalyzer;
+import com.flechazo.hkt.business.control.MaybePath;
+import com.flechazo.hkt.business.core.Pathway;
 import com.mojang.logging.LogUtils;
-import java.util.ArrayList;
-import java.util.Comparator;
-import java.util.LinkedHashMap;
-import java.util.List;
-import java.util.Locale;
-import java.util.Map;
-import java.util.Set;
+import net.fabricmc.loader.api.FabricLoader;
+import net.minecraft.core.registries.BuiltInRegistries;
 import net.minecraft.resources.ResourceLocation;
 import net.minecraft.world.effect.MobEffect;
 import net.minecraft.world.entity.EntityType;
 import net.minecraft.world.item.Item;
 import net.minecraft.world.level.block.Block;
-import net.minecraftforge.fml.ModList;
-import net.minecraftforge.registries.ForgeRegistries;
 import org.slf4j.Logger;
+
+import java.util.*;
 
 public final class OwnerResolver {
     private static final Logger LOGGER = LogUtils.getLogger();
@@ -34,24 +31,24 @@ public final class OwnerResolver {
 
     public List<ResolvedOwner> resolveOwners(String owner) {
         if (analyzer.isLivingEntity(owner)) {
-            ResolvedOwner resolved = resolveDirectOwner(owner);
-            return resolved != null ? List.of(resolved) : List.of(fallbackOwner(owner));
+            return resolveDirectOwner(owner)
+                    .map(List::of)
+                    .getOrElseGet(() -> List.of(fallbackOwner(owner)));
         }
 
-        String outerLivingOwner = outerLivingOwner(owner);
-        if (outerLivingOwner != null) {
-            ResolvedOwner resolved = resolveDirectOwner(outerLivingOwner);
-            return resolved != null ? List.of(resolved) : List.of(fallbackOwner(outerLivingOwner));
+        MaybePath<String> outerLivingOwner = outerLivingOwner(owner);
+        if (outerLivingOwner.run().isDefined()) {
+            return outerLivingOwner
+                    .via(this::resolveDirectOwner)
+                    .map(List::of)
+                    .getOrElseGet(() -> List.of(fallbackOwner(outerLivingOwner.getOrElse(owner))));
         }
 
         Set<String> creators = analyzer.creators(owner);
         if (!creators.isEmpty()) {
             List<ResolvedOwner> result = new ArrayList<>();
             for (String creator : creators) {
-                ResolvedOwner resolved = resolveDirectOwner(creator);
-                if (resolved != null) {
-                    result.add(resolved);
-                }
+                resolveDirectOwner(creator).peek(result::add);
             }
             if (!result.isEmpty()) {
                 return result;
@@ -63,19 +60,17 @@ public final class OwnerResolver {
             return directCreators;
         }
 
-        String behaviorTarget = analyzer.behaviorTarget(owner);
-        if (behaviorTarget != null && analyzer.isLivingEntity(behaviorTarget)) {
-            ResolvedOwner resolved = resolveDirectOwner(behaviorTarget);
-            if (resolved != null) {
-                return List.of(resolved);
-            }
+        MaybePath<List<ResolvedOwner>> behaviorOwners = Pathway.nullable(analyzer.behaviorTarget(owner))
+                .filter(analyzer::isLivingEntity)
+                .via(this::resolveDirectOwner)
+                .map(List::of);
+        if (behaviorOwners.run().isDefined()) {
+            return behaviorOwners.getOrElse(List.of());
         }
 
-        ResolvedOwner direct = resolveDirectOwner(owner);
-        if (direct != null) {
-            return List.of(direct);
-        }
-        return List.of(fallbackOwner(owner));
+        return resolveDirectOwner(owner)
+                .map(List::of)
+                .getOrElseGet(() -> List.of(fallbackOwner(owner)));
     }
 
     /**
@@ -86,35 +81,36 @@ public final class OwnerResolver {
         if (analyzer.isLivingEntity(owner)) {
             return true;
         }
-        if (outerLivingOwner(owner) != null) {
+        if (outerLivingOwner(owner).run().isDefined()) {
             return true;
         }
         if (!analyzer.creators(owner).isEmpty()) {
             return true;
         }
-        String behaviorTarget = analyzer.behaviorTarget(owner);
-        return behaviorTarget != null && analyzer.isLivingEntity(behaviorTarget);
+        return Pathway.nullable(analyzer.behaviorTarget(owner))
+                .filter(analyzer::isLivingEntity)
+                .run()
+                .isDefined();
     }
 
-    private String outerLivingOwner(String owner) {
+    private MaybePath<String> outerLivingOwner(String owner) {
         int innerMarker = owner.indexOf('$');
         if (innerMarker < 0) {
-            return null;
+            return Pathway.nothing();
         }
         String outer = owner.substring(0, innerMarker);
-        return analyzer.isLivingEntity(outer) ? outer : null;
+        return analyzer.isLivingEntity(outer) ? Pathway.just(outer) : Pathway.nothing();
     }
 
-    private ResolvedOwner resolveDirectOwner(String owner) {
+    private MaybePath<ResolvedOwner> resolveDirectOwner(String owner) {
         String className = classNameOf(owner);
 
-        RegistryIndex.Match match = registryIndex.findBySuffix(owner);
-        if (match != null) {
-            String namespace = parseNamespace(match.descriptionId());
-            return new ResolvedOwner(namespace, keyFromDescriptionId(match.descriptionId(), className, owner, match.entityId()));
-        }
-
-        return resolveFromLanguage(owner, className);
+        return registryIndex.findBySuffix(owner)
+                .map(match -> {
+                    String namespace = parseNamespace(match.descriptionId());
+                    return new ResolvedOwner(namespace, keyFromDescriptionId(match.descriptionId(), className, owner, match.entityId()));
+                })
+                .orElse(() -> resolveFromLanguage(owner, className));
     }
 
     private ResolvedOwner fallbackOwner(String owner) {
@@ -134,10 +130,7 @@ public final class OwnerResolver {
             if (analyzer.isSpawnableEntity(creator) || analyzer.isLivingEntity(creator)) {
                 continue; // intermediate spawnables and living entities are handled by creators()
             }
-            ResolvedOwner resolved = resolveDirectOwner(creator);
-            if (resolved != null) {
-                result.add(resolved);
-            }
+            resolveDirectOwner(creator).peek(result::add);
         }
         return result;
     }
@@ -148,12 +141,13 @@ public final class OwnerResolver {
         String keyName = lastDot >= 0 ? descriptionId.substring(lastDot + 1) : descriptionId;
         Map<String, String> en = LanguageLoader.loadLanguage(namespace, "en_us");
         Map<String, String> zh = LanguageLoader.loadLanguage(namespace, "zh_cn");
-        String enName = en.getOrDefault(descriptionId, formatName(keyName));
+        String hardFallback = entityId == null || entityId.isBlank() ? descriptionId : entityId;
+        String enName = en.getOrDefault(descriptionId, hardFallback);
         String zhName = zh.getOrDefault(descriptionId, enName);
         return new MobKey(enName, zhName, fallbackClass, analyzer.ownerType(owner), entityId);
     }
 
-    private ResolvedOwner resolveFromLanguage(String owner, String className) {
+    private MaybePath<ResolvedOwner> resolveFromLanguage(String owner, String className) {
         String namespace = detectNamespace(owner);
         Map<String, String> en = LanguageLoader.loadLanguage(namespace, "en_us");
         Map<String, String> zh = LanguageLoader.loadLanguage(namespace, "zh_cn");
@@ -165,11 +159,11 @@ public final class OwnerResolver {
                 if (en.containsKey(key)) {
                     String enName = en.get(key);
                     String zhName = zh.getOrDefault(key, enName);
-                    return new ResolvedOwner(namespace, new MobKey(enName, zhName, className, analyzer.ownerType(owner)));
+                    return Pathway.just(new ResolvedOwner(namespace, new MobKey(enName, zhName, className, analyzer.ownerType(owner))));
                 }
             }
         }
-        return null;
+        return Pathway.just(new ResolvedOwner(namespace, new MobKey(namespace + ":" + camelToSnake(className), namespace + ":" + camelToSnake(className), className, analyzer.ownerType(owner))));
     }
 
     private static String parseNamespace(String descriptionId) {
@@ -204,19 +198,11 @@ public final class OwnerResolver {
     }
 
     private static List<String> loadedModIds() {
-        ModList modList;
-        try {
-            modList = ModList.get();
-        } catch (Exception ignored) {
-            return List.of();
-        }
-        if (modList == null) {
-            return List.of();
-        }
-        return modList.getMods().stream()
-                .map(modInfo -> modInfo.getModId().toLowerCase(Locale.ROOT))
-                .sorted(Comparator.comparingInt(String::length).reversed())
-                .toList();
+        return Pathway.tryOf(() -> FabricLoader.getInstance().getAllMods().stream()
+                        .map(container -> container.getMetadata().getId().toLowerCase(Locale.ROOT))
+                        .sorted(Comparator.comparingInt(String::length).reversed())
+                        .toList())
+                .getOrElse(List.of());
     }
 
     private static String classNameOf(String owner) {
@@ -272,16 +258,16 @@ public final class OwnerResolver {
         private static final Map<String, MobEffect> EFFECTS = new LinkedHashMap<>();
 
         static {
-            for (EntityType<?> type : ForgeRegistries.ENTITY_TYPES.getValues()) {
+            for (EntityType<?> type : BuiltInRegistries.ENTITY_TYPE) {
                 ENTITY_TYPES.putIfAbsent(lastSegment(type.getDescriptionId()), type);
             }
-            for (Block block : ForgeRegistries.BLOCKS.getValues()) {
+            for (Block block : BuiltInRegistries.BLOCK) {
                 BLOCKS.putIfAbsent(lastSegment(block.getDescriptionId()), block);
             }
-            for (Item item : ForgeRegistries.ITEMS.getValues()) {
+            for (Item item : BuiltInRegistries.ITEM) {
                 ITEMS.putIfAbsent(lastSegment(item.getDescriptionId()), item);
             }
-            for (MobEffect effect : ForgeRegistries.MOB_EFFECTS.getValues()) {
+            for (MobEffect effect : BuiltInRegistries.MOB_EFFECT) {
                 EFFECTS.putIfAbsent(lastSegment(effect.getDescriptionId()), effect);
             }
         }
@@ -291,7 +277,7 @@ public final class OwnerResolver {
             return dot >= 0 ? id.substring(dot + 1) : id;
         }
 
-        Match findBySuffix(String owner) {
+        MaybePath<Match> findBySuffix(String owner) {
             String outer = owner.split("\\$")[0];
             String className = outer.substring(outer.lastIndexOf('.') + 1);
             for (String variant : classNameVariants(className)) {
@@ -299,26 +285,26 @@ public final class OwnerResolver {
 
                 EntityType<?> entityType = ENTITY_TYPES.get(snake);
                 if (entityType != null) {
-                    ResourceLocation key = ForgeRegistries.ENTITY_TYPES.getKey(entityType);
-                    return new Match(entityType.getDescriptionId(), key == null ? null : key.toString());
+                    ResourceLocation key = BuiltInRegistries.ENTITY_TYPE.getKey(entityType);
+                    return Pathway.just(new Match(entityType.getDescriptionId(), key.toString()));
                 }
 
                 Block block = BLOCKS.get(snake);
                 if (block != null) {
-                    return new Match(block.getDescriptionId(), null);
+                    return Pathway.just(new Match(block.getDescriptionId(), null));
                 }
 
                 Item item = ITEMS.get(snake);
                 if (item != null) {
-                    return new Match(item.getDescriptionId(), null);
+                    return Pathway.just(new Match(item.getDescriptionId(), null));
                 }
 
                 MobEffect effect = EFFECTS.get(snake);
                 if (effect != null) {
-                    return new Match(effect.getDescriptionId(), null);
+                    return Pathway.just(new Match(effect.getDescriptionId(), null));
                 }
             }
-            return null;
+            return Pathway.nothing();
         }
 
         private record Match(String descriptionId, String entityId) {

@@ -1,25 +1,15 @@
 package cc.sighs.oed.asm;
 
+import com.flechazo.hkt.business.core.Pathway;
 import com.mojang.logging.LogUtils;
-import java.io.IOException;
-import java.nio.file.ClosedWatchServiceException;
+import org.slf4j.Logger;
+
 import java.nio.charset.StandardCharsets;
-import java.nio.file.Files;
-import java.nio.file.Path;
-import java.nio.file.Paths;
-import java.nio.file.StandardWatchEventKinds;
-import java.nio.file.WatchEvent;
-import java.nio.file.WatchKey;
-import java.nio.file.WatchService;
-import java.util.HashSet;
-import java.util.HashMap;
-import java.util.List;
-import java.util.Map;
-import java.util.Set;
+import java.nio.file.*;
+import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.function.Consumer;
-import org.slf4j.Logger;
 
 public final class DamagePointTomlConfig {
     public static final Path CONFIG_FILE = Paths.get("config", "OED", "damage-point-dictionary.toml");
@@ -60,24 +50,24 @@ public final class DamagePointTomlConfig {
         if (parent == null) {
             return;
         }
-        try {
-            Files.createDirectories(parent);
-            WatchService service = parent.getFileSystem().newWatchService();
-            parent.register(
-                    service,
-                    StandardWatchEventKinds.ENTRY_CREATE,
-                    StandardWatchEventKinds.ENTRY_MODIFY,
-                    StandardWatchEventKinds.ENTRY_DELETE
-            );
-            watchService = service;
-            watcherStarted = true;
-            Thread thread = new Thread(DamagePointTomlConfig::watchLoop, "OED TOML config watcher");
-            thread.setDaemon(true);
-            thread.start();
-            LOGGER.info("OED debug: watching {} for live attribute default updates", CONFIG_FILE);
-        } catch (IOException e) {
-            LOGGER.error("OED debug: failed to start TOML watcher", e);
-        }
+        Pathway.tryOf(() -> {
+                    Files.createDirectories(parent);
+                    WatchService service = parent.getFileSystem().newWatchService();
+                    parent.register(
+                            service,
+                            StandardWatchEventKinds.ENTRY_CREATE,
+                            StandardWatchEventKinds.ENTRY_MODIFY,
+                            StandardWatchEventKinds.ENTRY_DELETE
+                    );
+                    watchService = service;
+                    watcherStarted = true;
+                    Thread thread = new Thread(DamagePointTomlConfig::watchLoop, "OED TOML config watcher");
+                    thread.setDaemon(true);
+                    thread.start();
+                    return CONFIG_FILE;
+                })
+                .peek(file -> LOGGER.info("OED debug: watching {} for live attribute default updates", file))
+                .peekFailure(error -> LOGGER.error("OED debug: failed to start TOML watcher", error));
     }
 
     public static Set<String> reloadIncremental() {
@@ -114,14 +104,13 @@ public final class DamagePointTomlConfig {
         }
 
         Map<String, Float> values = new HashMap<>();
-        try {
-            List<String> lines = Files.readAllLines(file, StandardCharsets.UTF_8);
-            for (String line : lines) {
-                readLine(line, values);
-            }
-        } catch (IOException e) {
-            LOGGER.error("OED dictionary: failed to read toml values from {}", file, e);
-        }
+        Pathway.tryOf(() -> Files.readAllLines(file, StandardCharsets.UTF_8))
+                .peek(lines -> {
+                    for (String line : lines) {
+                        readLine(line, values);
+                    }
+                })
+                .peekFailure(error -> LOGGER.error("OED dictionary: failed to read toml values from {}", file, error));
         return Map.copyOf(values);
     }
 
@@ -142,10 +131,8 @@ public final class DamagePointTomlConfig {
 
         String key = unescapeTomlString(trimmed.substring(1, keyEnd));
         String valueText = stripComment(trimmed.substring(equals + 1).trim());
-        try {
-            values.put(key, Float.parseFloat(valueText));
-        } catch (NumberFormatException ignored) {
-        }
+        Pathway.tryOf(() -> Float.parseFloat(valueText))
+                .peek(value -> values.put(key, value));
     }
 
     private static int findClosingQuote(String value) {
@@ -178,40 +165,44 @@ public final class DamagePointTomlConfig {
 
     private static void watchLoop() {
         while (watcherStarted && watchService != null) {
-            WatchKey key;
-            try {
-                key = watchService.take();
-            } catch (ClosedWatchServiceException ignored) {
+            boolean keepWatching = Pathway.tryOf(() -> watchService.take())
+                    .map(key -> {
+                        boolean reload = false;
+                        for (WatchEvent<?> event : key.pollEvents()) {
+                            if (event.context() instanceof Path changed
+                                    && CONFIG_FILE.getFileName().equals(changed)
+                                    && event.kind() != StandardWatchEventKinds.OVERFLOW) {
+                                reload = true;
+                            }
+                        }
+                        if (!key.reset()) {
+                            return false;
+                        }
+                        return !reload || debounceAndReload();
+                    })
+                    .peekFailure(error -> {
+                        if (error instanceof InterruptedException) {
+                            Thread.currentThread().interrupt();
+                        }
+                    })
+                    .getOrElse(false);
+            if (!keepWatching) {
                 return;
-            } catch (InterruptedException e) {
-                Thread.currentThread().interrupt();
-                return;
-            }
-
-            boolean reload = false;
-            for (WatchEvent<?> event : key.pollEvents()) {
-                if (event.context() instanceof Path changed
-                        && CONFIG_FILE.getFileName().equals(changed)
-                        && event.kind() != StandardWatchEventKinds.OVERFLOW) {
-                    reload = true;
-                }
-            }
-            if (!key.reset()) {
-                return;
-            }
-            if (reload) {
-                debounceAndReload();
             }
         }
     }
 
-    private static void debounceAndReload() {
-        try {
-            Thread.sleep(150L);
-        } catch (InterruptedException e) {
-            Thread.currentThread().interrupt();
-            return;
-        }
-        reloadIncremental();
+    private static boolean debounceAndReload() {
+        return Pathway.tryOf(() -> {
+                    Thread.sleep(150L);
+                    return true;
+                })
+                .peek(ignored -> reloadIncremental())
+                .peekFailure(error -> {
+                    if (error instanceof InterruptedException) {
+                        Thread.currentThread().interrupt();
+                    }
+                })
+                .getOrElse(false);
     }
 }

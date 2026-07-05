@@ -1,0 +1,27 @@
+{
+	"schemaVersion": 1,
+	"id": "oneenoughdamage",
+	"version": "${version}",
+	"name": "OneEnoughDamage",
+	"description": "Snowy magic.",
+	"authors": [
+		"MerrySnow"
+	],
+	"license": "GNU GPL 3.0",
+	"icon": "assets/oneenoughdamage/icon.png",
+	"environment": "*",
+	"entrypoints": {
+		"main": [
+			"cc.sighs.oed.OneEnoughDamage"
+		]
+	},
+	"mixins": [
+		"oneenoughdamage.mixins.json"
+	],
+	"depends": {
+		"fabricloader": ">=0.19.3",
+		"minecraft": "~1.20.1",
+		"java": ">=17",
+		"fabric-api": "*"
+	}
+}

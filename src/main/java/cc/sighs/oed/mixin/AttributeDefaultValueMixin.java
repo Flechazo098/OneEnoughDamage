@@ -3,9 +3,9 @@ package cc.sighs.oed.mixin;
 import cc.sighs.oed.OneEnoughDamage;
 import cc.sighs.oed.asm.DamagePointConfig;
 import cc.sighs.oed.asm.DamagePointTomlConfig;
+import net.minecraft.core.registries.BuiltInRegistries;
 import net.minecraft.resources.ResourceLocation;
 import net.minecraft.world.entity.ai.attributes.Attribute;
-import net.minecraftforge.registries.ForgeRegistries;
 import org.spongepowered.asm.mixin.Mixin;
 import org.spongepowered.asm.mixin.injection.At;
 import org.spongepowered.asm.mixin.injection.Inject;
@@ -19,7 +19,7 @@ public abstract class AttributeDefaultValueMixin {
             return;
         }
 
-        ResourceLocation id = ForgeRegistries.ATTRIBUTES.getKey((Attribute) (Object) this);
+        ResourceLocation id = BuiltInRegistries.ATTRIBUTE.getKey((Attribute) (Object) this);
         if (id == null || !OneEnoughDamage.MODID.equals(id.getNamespace())) {
             return;
         }

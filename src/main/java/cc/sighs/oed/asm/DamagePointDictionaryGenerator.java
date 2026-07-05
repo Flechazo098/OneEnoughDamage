@@ -1,14 +1,12 @@
 package cc.sighs.oed.asm;
 
-import cc.sighs.oed.dictionary.MarkdownRenderer;
-import cc.sighs.oed.dictionary.MobKey;
-import cc.sighs.oed.dictionary.OwnerResolver;
-import cc.sighs.oed.dictionary.ResolvedOwner;
-import cc.sighs.oed.dictionary.TomlDictionaryRenderer;
+import cc.sighs.oed.dictionary.*;
 import cc.sighs.oed.scan.DamagePointScanResult;
 import cc.sighs.oed.scan.DamagePointScanner;
+import com.flechazo.hkt.business.core.Pathway;
 import com.mojang.logging.LogUtils;
-import java.io.IOException;
+import org.slf4j.Logger;
+
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
@@ -16,7 +14,6 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.TreeMap;
-import org.slf4j.Logger;
 
 /**
  * Generates config dictionaries from the scanned damage point cache.
@@ -39,27 +36,23 @@ public final class DamagePointDictionaryGenerator {
             LOGGER.info("OED dictionary: cache not found, skipping");
             return;
         }
-        try {
-            long cacheTime = Files.getLastModifiedTime(CACHE_FILE).toMillis();
-            if (isUpToDate(DICTIONARY_FILE, cacheTime)
-                    && isUpToDate(CONFIG_FILE, cacheTime)
-                    && isUpToDate(UNATTRIBUTED_FILE, cacheTime)) {
-                LOGGER.info("OED dictionary: up to date");
-                return;
-            }
-        } catch (IOException e) {
-            LOGGER.error("OED dictionary: failed to compare file times", e);
+        boolean shouldGenerate = Pathway.tryOf(() -> Files.getLastModifiedTime(CACHE_FILE).toMillis())
+                .map(cacheTime -> !isUpToDate(DICTIONARY_FILE, cacheTime)
+                        || !isUpToDate(CONFIG_FILE, cacheTime)
+                        || !isUpToDate(UNATTRIBUTED_FILE, cacheTime))
+                .peekFailure(error -> LOGGER.error("OED dictionary: failed to compare file times", error))
+                .getOrElse(false);
+        if (!shouldGenerate) {
+            LOGGER.info("OED dictionary: up to date");
             return;
         }
         generate();
     }
 
     private static boolean isUpToDate(Path file, long cacheTime) {
-        try {
-            return Files.isRegularFile(file) && Files.getLastModifiedTime(file).toMillis() >= cacheTime;
-        } catch (IOException e) {
-            return false;
-        }
+        return Files.isRegularFile(file)
+                && Pathway.tryOf(() -> Files.getLastModifiedTime(file).toMillis() >= cacheTime)
+                .getOrElse(false);
     }
 
     private static void generate() {
